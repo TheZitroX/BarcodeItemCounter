@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ZXing Scanner</title>
+  <title>ZXing Scanner (robust)</title>
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;background:#f6f7fb}
     .wrap{max-width:760px;margin:0 auto}
@@ -45,41 +45,7 @@
   </table>
 </div>
 
-<!-- ZXing loader with CDN fallback; enables Start when ready -->
-<script>
-  document.addEventListener('DOMContentLoaded', () => {
-    const btn = document.getElementById('btnStart');
-    btn.disabled = true;
-  });
-
-  window.__zxingReady = new Promise((resolve, reject) => {
-    const urls = [
-      "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/index.min.js",
-      "https://unpkg.com/@zxing/browser@0.1.5/umd/index.min.js"
-    ];
-    (function tryNext(i){
-      if (i >= urls.length) return reject(new Error("ZXing failed to load"));
-      const s = document.createElement("script");
-      s.src = urls[i];
-      s.defer = true;
-      s.onload = () => resolve(window.ZXingBrowser);
-      s.onerror = () => tryNext(i+1);
-      document.head.appendChild(s);
-    })(0);
-  }).then(() => {
-    const btn = document.getElementById('btnStart');
-    if (btn) btn.disabled = false;
-    const msg = document.getElementById('msg');
-    msg.className = 'ok';
-    msg.textContent = 'ZXing ready.';
-  }).catch(err => {
-    const msg = document.getElementById('msg');
-    msg.className = 'err';
-    msg.textContent = err.message;
-  });
-</script>
-
-<script>
+<script type="module">
   const msg = document.getElementById('msg');
   const vid = document.getElementById('vid');
   const scanEl = document.getElementById('scan');
@@ -91,15 +57,16 @@
   const btnCSV   = document.getElementById('btnCSV');
   const btnTorch = document.getElementById('btnTorch');
 
+  let ZX = null; // module namespace
   let stream = null;
   let zxingControls = null;
   const counts = new Map();
   let lastScan = { code: null, t: 0 };
   const DEBOUNCE_MS = 1200;
 
-  function logInfo(t){ msg.className='ok'; msg.textContent=t; }
-  function logWarn(t){ msg.className='warn'; msg.textContent=t; }
-  function logErr(t){ msg.className='err'; msg.textContent=t; }
+  const ok = t => { msg.className='ok'; msg.textContent=t; };
+  const warn = t => { msg.className='warn'; msg.textContent=t; };
+  const err = t => { msg.className='err'; msg.textContent=t; };
 
   function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
   function jsq(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
@@ -154,24 +121,55 @@
     } catch {}
   }
 
+  async function loadZXingWithFallback(timeoutMs=6000){
+    const cdns = [
+      "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/esm/index.min.js",
+      "https://unpkg.com/@zxing/browser@0.1.5/esm/index.min.js"
+    ];
+    for (const url of cdns) {
+      try {
+        const mod = await Promise.race([
+          import(/* @vite-ignore */ url),
+          new Promise((_, rej)=>setTimeout(()=>rej(new Error('timeout')), timeoutMs))
+        ]);
+        return mod;
+      } catch(e) {
+        // try next
+      }
+    }
+    throw new Error("ZXing failed to load from both CDNs");
+  }
+
+  // boot: load ZXing first; then enable Start
+  (async () => {
+    try {
+      ZX = await loadZXingWithFallback();
+      ok('ZXing ready.');
+      btnStart.disabled = false;
+    } catch(e) {
+      err(e.message);
+      btnStart.disabled = true;
+    }
+  })();
+
   async function startCamera() {
     try {
       vid.setAttribute('muted',''); vid.muted = true; vid.playsInline = true;
       const constraints = { audio:false, video:{ facingMode:'environment', width:{ideal:1280}, height:{ideal:720} } };
-      logInfo('Requesting camera…');
+      ok('Requesting camera…');
       stream = await navigator.mediaDevices.getUserMedia(constraints);
       vid.srcObject = stream;
       try { await vid.play(); } catch(e){}
 
-      if (window.__zxingReady) {
-        logInfo('Waiting for ZXing…');
-        await window.__zxingReady;
+      if (!ZX) {
+        err('ZXing not loaded.');
+        return;
       }
-      logInfo('Camera running. Starting ZXing…');
+      ok('Camera running. Starting ZXing…');
       startZXing();
     } catch (e) {
-      logErr(`getUserMedia ERROR: ${e.name} – ${e.message}
-• iOS requires HTTPS (GitHub Pages is fine)
+      err(`getUserMedia ERROR: ${e.name} – ${e.message}
+• iOS requires HTTPS
 • Check camera permission`);
     }
   }
@@ -179,13 +177,11 @@
   function stopCamera() {
     if (zxingControls) { zxingControls.stop(); zxingControls = null; }
     if (vid.srcObject) { vid.srcObject.getTracks().forEach(t=>t.stop()); vid.srcObject=null; }
-    stream = null;
-    logWarn('Camera stopped.');
+    warn('Camera stopped.');
   }
 
   function startZXing() {
-    if (!window.ZXingBrowser) { logErr('ZXing not loaded.'); return; }
-    const { BrowserMultiFormatReader, NotFoundException, DecodeHintType, BarcodeFormat } = ZXingBrowser;
+    const { BrowserMultiFormatReader, NotFoundException, DecodeHintType, BarcodeFormat } = ZX;
 
     const reader = new BrowserMultiFormatReader();
     const hints = new Map();
@@ -199,18 +195,18 @@
         const text = result.getText();
 
         const now = Date.now();
-        if (lastScan.code === text && (now - lastScan.t) < 1200) return;
+        if (lastScan.code === text && (now - lastScan.t) < DEBOUNCE_MS) return;
         lastScan = { code: text, t: now };
 
         bump(text, fmt);
         scanEl.textContent = `${text}  [${fmt}]`;
         try { navigator.vibrate && navigator.vibrate(30); } catch {}
       } else if (err && !(err instanceof NotFoundException)) {
-        logWarn('ZXing: ' + err);
+        warn('ZXing: ' + err);
       }
     });
 
-    logInfo('ZXing active.');
+    ok('ZXing active.');
   }
 
   function resetCounts(){ counts.clear(); renderList(); scanEl.textContent='—'; }
@@ -231,9 +227,9 @@
       if (!track) return;
       await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
       torchOn = !torchOn;
-      logInfo('Torch: ' + (torchOn?'on':'off'));
+      ok('Torch: ' + (torchOn?'on':'off'));
     } catch(e) {
-      logWarn('Torch unsupported');
+      warn('Torch unsupported');
     }
   }
 
