@@ -1,138 +1,217 @@
 <!doctype html>
-<html lang="en">
+<html lang="de">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>ZXing Barcode Scanner</title>
+  <title>iOS Kamera-Test + ZXing</title>
   <style>
-    body { margin:0; font-family: system-ui, sans-serif; background:#f6f7fb; }
-    .wrap { max-width: 800px; margin: 0 auto; padding: 20px; }
-    h1 { margin:0 0 12px; }
-    video { width:100%; border-radius:12px; background:#000; }
-    .row { display:flex; gap:8px; flex-wrap:wrap; margin:12px 0; }
-    .btn { padding:10px 14px; border:1px solid #ccd; border-radius:10px; background:#fff; cursor:pointer; }
-    table { width:100%; border-collapse:collapse; margin-top:10px; }
-    th,td { border-bottom:1px solid #eee; padding:6px; text-align:left; }
-    .ok{color:#0a7} .err{color:#c00} .warn{color:#a70}
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;background:#f6f7fb}
+    .wrap{max-width:760px;margin:0 auto}
+    video{width:100%;background:#000;border-radius:12px}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
+    .btn{padding:10px 14px;border:1px solid #ccd;border-radius:10px;background:#fff;cursor:pointer}
+    .ok{color:#0a7}.warn{color:#a70}.err{color:#c00;white-space:pre-wrap}
+    table{width:100%;border-collapse:collapse;margin-top:8px}
+    th,td{border-bottom:1px solid #e8e8e8;padding:6px;text-align:left}
+    .kv{font-family:ui-monospace,Consolas,monospace;font-size:13px;background:#fff;border:1px dashed #ccd;padding:10px;border-radius:10px}
+    .badge{background:#eef;border:1px solid #dde;padding:6px 10px;border-radius:999px}
   </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>ZXing Barcode Scanner</h1>
+  <h1>iOS Kamera-Test + ZXing</h1>
+  <div class="kv" id="diag">…</div>
 
   <div class="row">
-    <button class="btn" id="btnStart">Start Camera</button>
-    <button class="btn" id="btnStop">Stop</button>
-    <button class="btn" id="btnReset">Reset</button>
-    <button class="btn" id="btnExport">Export CSV</button>
-    <span id="total" class="ok">Total: 0</span>
+    <button class="btn" type="button" onclick="startCamera()">Kamera starten</button>
+    <button class="btn" type="button" onclick="stopCamera()">Stop</button>
+    <button class="btn" type="button" onclick="resetCounts()">Reset</button>
+    <button class="btn" type="button" onclick="exportCSV()">CSV</button>
+    <button class="btn" type="button" onclick="toggleTorch()">Torch</button>
+    <span class="badge">Gesamt: <span id="total">0</span></span>
   </div>
 
-  <video id="video" playsinline webkit-playsinline autoplay muted></video>
-  <div id="status" class="warn">Ready.</div>
+  <video id="vid" playsinline webkit-playsinline autoplay muted></video>
 
+  <h3>Letzte Meldung</h3>
+  <div id="msg" class="ok">Bereit.</div>
+
+  <h3>Letzter Scan</h3>
+  <div id="scan">—</div>
+
+  <h3>Liste</h3>
   <table>
-    <thead><tr><th>Code</th><th>Format</th><th>Count</th></tr></thead>
-    <tbody id="list"></tbody>
+    <thead><tr><th>Code</th><th>Format</th><th>Menge</th><th>Aktion</th></tr></thead>
+    <tbody id="list"><tr><td colspan="4" style="color:#777">—</td></tr></tbody>
   </table>
 </div>
 
-<script type="module">
-  import {
-    BrowserMultiFormatReader,
-    NotFoundException,
-    BarcodeFormat,
-    DecodeHintType
-  } from "https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/esm/index.min.js";
-
-  const video = document.getElementById('video');
-  const status = document.getElementById('status');
-  const totalEl = document.getElementById('total');
+<script defer src="https://unpkg.com/@zxing/browser@0.1.5/umd/index.min.js"></script>
+<script>
+  const msg = document.getElementById('msg');
+  const diag = document.getElementById('diag');
+  const vid = document.getElementById('vid');
+  const scanEl = document.getElementById('scan');
   const listEl = document.getElementById('list');
-  const btnStart = document.getElementById('btnStart');
-  const btnStop = document.getElementById('btnStop');
-  const btnReset = document.getElementById('btnReset');
-  const btnExport = document.getElementById('btnExport');
+  const totalEl = document.getElementById('total');
 
-  const reader = new BrowserMultiFormatReader();
-  let controls = null;
+  let stream = null;
+  let zxingControls = null;
   const counts = new Map();
+  let lastScan = { code: null, t: 0 };
+  const DEBOUNCE_MS = 1200;
 
-  function render() {
-    let total = 0;
-    listEl.innerHTML = '';
-    for (const [code, data] of counts.entries()) {
-      total += data.count;
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${code}</td><td>${data.format}</td><td>${data.count}</td>`;
-      listEl.appendChild(tr);
+  function logInfo(t){ msg.className='ok'; msg.textContent=t; }
+  function logWarn(t){ msg.className='warn'; msg.textContent=t; }
+  function logErr(t){ msg.className='err'; msg.textContent=t; }
+
+  function showDiag() {
+    diag.textContent =
+`URL: ${location.href}
+SecureContext: ${window.isSecureContext}
+UserAgent: ${navigator.userAgent}
+MediaDevices: ${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}
+Autoplay muted inline: gesetzt`;
+  }
+  showDiag();
+
+  async function startCamera() {
+    try {
+      vid.setAttribute('muted',''); vid.muted=true; vid.playsInline=true;
+      const constraints = { audio:false, video:{ facingMode:'environment', width:{ideal:1280}, height:{ideal:720} } };
+      logInfo('Frage Kamera an …');
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      vid.srcObject = stream;
+      try { await vid.play(); } catch(e){}
+      logInfo('Kamera läuft. Starte ZXing …');
+      startZXing();
+    } catch (e) {
+      logErr(`getUserMedia ERROR: ${e.name} – ${e.message}
+• iOS braucht HTTPS (Pages ok)
+• Kamera-Berechtigung prüfen`);
     }
-    totalEl.textContent = 'Total: ' + total;
   }
 
-  function bump(code, format) {
-    const entry = counts.get(code) || {count:0, format};
-    entry.count++;
-    counts.set(code, entry);
-    render();
-    status.textContent = 'Scanned: ' + code;
-    status.className = 'ok';
+  function stopCamera() {
+    if (zxingControls) { zxingControls.stop(); zxingControls = null; }
+    if (vid.srcObject) { vid.srcObject.getTracks().forEach(t=>t.stop()); vid.srcObject=null; }
+    stream = null;
+    logWarn('Kamera gestoppt.');
   }
 
-  function startCamera() {
+  function startZXing() {
+    if (!window.ZXingBrowser) { logErr('ZXing nicht geladen.'); return; }
+    const { BrowserMultiFormatReader, NotFoundException, DecodeHintType, BarcodeFormat } = ZXingBrowser;
+
+    const reader = new BrowserMultiFormatReader();
     const hints = new Map();
     hints.set(DecodeHintType.TRY_HARDER, true);
     reader.hints = hints;
 
-    controls = reader.decodeFromVideoDevice(
-      undefined,
-      video,
-      (result, err) => {
-        if (result) {
-          bump(result.getText(), BarcodeFormat[result.getBarcodeFormat()]);
-        } else if (err && !(err instanceof NotFoundException)) {
-          status.textContent = 'Error: ' + err;
-          status.className = 'err';
-        }
-      },
-      {
-        videoConstraints: {
-          audio:false,
-          video:{ facingMode:'environment', width:{ideal:1280}, height:{ideal:720} }
-        }
+    zxingControls = reader.decodeFromVideoElement(vid, (result, err) => {
+      if (result) {
+        const fmtEnum = result.getBarcodeFormat();
+        const fmt = BarcodeFormat[fmtEnum] || String(fmtEnum);
+        const text = result.getText();
+
+        const now = Date.now();
+        if (lastScan.code === text && (now - lastScan.t) < DEBOUNCE_MS) return;
+        lastScan = { code: text, t: now };
+
+        bump(text, fmt);
+        scanEl.textContent = `${text}  [${fmt}]`;
+        try { navigator.vibrate && navigator.vibrate(30); } catch {}
+      } else if (err && !(err instanceof NotFoundException)) {
+        logWarn('ZXing: ' + err);
       }
-    );
-    status.textContent = 'Camera started';
-    status.className = 'warn';
+    });
+
+    logInfo('ZXing aktiv.');
   }
 
-  function stopCamera() {
-    if (controls) { controls.stop(); controls = null; }
-    if (video.srcObject) {
-      video.srcObject.getTracks().forEach(t=>t.stop());
-      video.srcObject = null;
-    }
-    status.textContent = 'Camera stopped';
-    status.className = 'warn';
+  function bump(code, format) {
+    const entry = counts.get(code) || { count: 0, format };
+    entry.count += 1;
+    entry.format = format;
+    counts.set(code, entry);
+    renderList();
+    beep();
   }
 
-  btnStart.onclick = startCamera;
-  btnStop.onclick = stopCamera;
-  btnReset.onclick = () => { counts.clear(); render(); };
-  btnExport.onclick = () => {
-    const rows = [['code','format','count']];
-    for (const [code,data] of counts.entries()) {
-      rows.push([code,data.format,data.count]);
+  function renderList() {
+    let total = 0;
+    if (counts.size === 0) {
+      listEl.innerHTML = '<tr><td colspan="4" style="color:#777">—</td></tr>';
+      totalEl.textContent = '0';
+      return;
     }
-    const csv = rows.map(r=>r.join(',')).join('\n');
-    const blob = new Blob([csv],{type:'text/csv'});
+    const rows = [];
+    for (const [code, d] of counts.entries()) {
+      total += d.count;
+      rows.push(
+        `<tr>
+           <td><code>${escapeHtml(code)}</code></td>
+           <td>${d.format}</td>
+           <td>${d.count}</td>
+           <td>
+             <button class="btn" onclick="inc('${jsq(code)}')">+1</button>
+             <button class="btn" onclick="dec('${jsq(code)}')">-1</button>
+             <button class="btn" onclick="delCode('${jsq(code)}')">Löschen</button>
+           </td>
+         </tr>`
+      );
+    }
+    listEl.innerHTML = rows.join('');
+    totalEl.textContent = String(total);
+  }
+
+  function inc(code){ const e = counts.get(code); if(!e) return; e.count++; renderList(); }
+  function dec(code){ const e = counts.get(code); if(!e) return; e.count = Math.max(0, e.count-1); renderList(); }
+  function delCode(code){ counts.delete(code); renderList(); }
+
+  function resetCounts(){ counts.clear(); renderList(); scanEl.textContent='—'; }
+
+  function exportCSV(){
+    const rows = [['code','format','menge']];
+    for (const [code,d] of counts.entries()) rows.push([code,d.format,d.count]);
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type:'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = 'scans.csv'; a.click();
+    const a = document.createElement('a'); a.href=url; a.download='scans.csv'; a.click();
     URL.revokeObjectURL(url);
-  };
+  }
 
-  render();
+  let torchOn = false;
+  async function toggleTorch(){
+    try {
+      const track = vid.srcObject?.getVideoTracks?.()[0];
+      if (!track) return;
+      await track.applyConstraints({ advanced: [{ torch: !torchOn }] });
+      torchOn = !torchOn;
+      logInfo('Torch: ' + (torchOn?'on':'off'));
+    } catch(e) {
+      logWarn('Torch unsupported');
+    }
+  }
+
+  function beep(){
+    try {
+      const ctx = new (window.AudioContext||window.webkitAudioContext)();
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type='square'; o.frequency.value=880;
+      g.gain.setValueAtTime(0.05, ctx.currentTime);
+      o.connect(g).connect(ctx.destination);
+      o.start(); o.stop(ctx.currentTime+0.07);
+    } catch {}
+  }
+
+  function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c])); }
+  function jsq(s){ return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'"); }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { if (vid && !vid.paused) vid.pause(); }
+    else { if (vid && vid.paused) vid.play().catch(()=>{}); }
+  });
 </script>
 </body>
 </html>
