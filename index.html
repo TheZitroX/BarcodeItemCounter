@@ -1,234 +1,138 @@
 <!doctype html>
 <html lang="de">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Barcode-Zähler (ZXing)</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>iOS Kamera-Test + ZXing</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; }
-    .wrap { max-width: 720px; margin: 0 auto; }
-    video { width: 100%; border-radius: 12px; background: #000; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 8px 0; }
-    .btn { padding: 10px 14px; border-radius: 10px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
-    .btn:active { transform: translateY(1px); }
-    .badge { padding: 6px 10px; border-radius: 999px; background: #eef; }
-    table { width: 100%; border-collapse: collapse; margin-top: 10px; }
-    th, td { border-bottom: 1px solid #eee; padding: 8px; text-align: left; }
-    .small { color: #666; font-size: 0.9em; }
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:16px;background:#f6f7fb}
+    .wrap{max-width:760px;margin:0 auto}
+    video{width:100%;background:#000;border-radius:12px}
+    .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:12px 0}
+    .btn{padding:10px 14px;border:1px solid #ccd;border-radius:10px;background:#fff;cursor:pointer}
+    .ok{color:#0a7}
+    .warn{color:#a70}
+    .err{color:#c00;white-space:pre-wrap}
+    code{background:#eef;padding:2px 6px;border-radius:6px}
+    .kv{font-family:ui-monospace,Consolas,monospace;font-size:13px;background:#fff;border:1px dashed #ccd;padding:10px;border-radius:10px}
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <h1>Barcode-Zähler</h1>
-    <div class="row small">
-      <div class="badge">iPhone-Kamera aktiv</div>
-      <span>Tipps: ausreichend Licht, Kamera ruhig halten. Doppelte Scans werden entprellt.</span>
-    </div>
+<div class="wrap">
+  <h1>iOS Kamera-Test + ZXing</h1>
+  <div class="kv" id="diag">…</div>
 
-    <video id="preview" playsinline muted autoplay></video>
-
-    <div class="row">
-      <button id="start" class="btn">Kamera starten</button>
-      <button id="stop" class="btn">Stop</button>
-      <button id="reset" class="btn">Zähler zurücksetzen</button>
-      <button id="export" class="btn">CSV exportieren</button>
-      <div class="badge">Gesamt: <span id="total">0</span></div>
-    </div>
-
-    <div class="row small">
-      <label>Formatfilter:&nbsp;
-        <select id="formats" multiple size="4">
-          <option value="EAN_13" selected>EAN_13</option>
-          <option value="EAN_8">EAN_8</option>
-          <option value="CODE_128" selected>CODE_128</option>
-          <option value="QR_CODE">QR_CODE</option>
-        </select>
-      </label>
-      <label>Rückkamera:
-        <input type="checkbox" id="rear" checked />
-      </label>
-      <label>Ton:
-        <input type="checkbox" id="beep" checked />
-      </label>
-    </div>
-
-    <table>
-      <thead>
-        <tr><th>Code</th><th>Format</th><th>Menge</th><th>Aktionen</th></tr>
-      </thead>
-      <tbody id="list"></tbody>
-    </table>
-
-    <p class="small">Hinweis: Safari unterstützt die Web-API <code>BarcodeDetector</code> nur eingeschränkt. Diese Demo nutzt
-      <code>zxing-js</code>, das Videoframes selbst dekodiert und so zuverlässig auf iPhones läuft.</p>
+  <div class="row">
+    <button class="btn" id="btnStart" type="button" onclick="startCamera()">Kamera starten</button>
+    <button class="btn" id="btnStop"  type="button" onclick="stopCamera()">Stop</button>
   </div>
 
-  <!-- ZXing JS (Browser-Bundle) -->
-  <script src="https://unpkg.com/@zxing/browser@0.1.5/umd/index.min.js"></script>
-  <script>
-    const { BrowserMultiFormatReader, NotFoundException, BarcodeFormat, DecodeHintType } = ZXingBrowser;
+  <video id="vid" playsinline webkit-playsinline autoplay muted></video>
 
-    const videoEl = document.getElementById('preview');
-    const startBtn = document.getElementById('start');
-    const stopBtn  = document.getElementById('stop');
-    const resetBtn = document.getElementById('reset');
-    const exportBtn = document.getElementById('export');
-    const formatsSel = document.getElementById('formats');
-    const rearChk = document.getElementById('rear');
-    const beepChk = document.getElementById('beep');
-    const totalEl = document.getElementById('total');
-    const listEl = document.getElementById('list');
+  <h3>Letzte Meldung</h3>
+  <div id="msg" class="ok">Bereit.</div>
+
+  <h3>Letzter Scan</h3>
+  <div id="scan">—</div>
+</div>
+
+<!-- ZXing (UMD) -->
+<script defer src="https://unpkg.com/@zxing/browser@0.1.5/umd/index.min.js"></script>
+<script>
+  const msg  = document.getElementById('msg');
+  const diag = document.getElementById('diag');
+  const vid  = document.getElementById('vid');
+  const scanEl = document.getElementById('scan');
+
+  let stream = null;
+  let zxingControls = null;
+
+  function logInfo(t){ msg.className='ok'; msg.textContent=t; console.log(t); }
+  function logWarn(t){ msg.className='warn'; msg.textContent=t; console.warn(t); }
+  function logErr(t){ msg.className='err'; msg.textContent=t; console.error(t); }
+
+  function showDiag() {
+    diag.textContent =
+      `URL: ${location.href}
+SecureContext: ${window.isSecureContext}
+UserAgent: ${navigator.userAgent}
+MediaDevices: ${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}
+Autoplay muted inline: gesetzt`;
+  }
+  showDiag();
+
+  async function startCamera() {
+    try {
+      vid.setAttribute('muted', '');
+      vid.muted = true;
+      vid.playsInline = true;
+
+      const constraints = {
+        audio: false,
+        video: {
+          facingMode: 'environment',
+          width:  { ideal: 1280 },
+          height: { ideal: 720 }
+        }
+      };
+
+      logInfo('Frage Kamera an …');
+      stream = await navigator.mediaDevices.getUserMedia(constraints);
+      vid.srcObject = stream;
+
+      try { await vid.play(); } catch(e){ }
+
+      logInfo('Kamera läuft. Starte ZXing …');
+      startZXing();
+    } catch (e) {
+      logErr(`getUserMedia ERROR: ${e.name} – ${e.message}
+Hinweise:
+• iOS verlangt HTTPS (GitHub Pages ist ok).
+• In der Adressleiste Kamera-Erlaubnis prüfen (AA → Website-Einstellungen).
+• Falls „Kein Zugriff“: Einstellungen > Safari/Chrome > Kamera → Erlauben.`);
+    }
+  }
+
+  function stopCamera() {
+    if (zxingControls) { zxingControls.stop(); zxingControls = null; }
+    if (vid.srcObject) {
+      vid.srcObject.getTracks().forEach(t => t.stop());
+      vid.srcObject = null;
+    }
+    stream = null;
+    logWarn('Kamera gestoppt.');
+  }
+
+  function startZXing() {
+    if (!window.ZXingBrowser) { logErr('ZXing nicht geladen. Prüfe Script-URL.'); return; }
+    const { BrowserMultiFormatReader, NotFoundException, DecodeHintType } = ZXingBrowser;
 
     const reader = new BrowserMultiFormatReader();
-    let controls = null;
-    let counts = new Map(); // code -> {count, format}
-    let lastScan = { code: null, t: 0 };
-    const DEBOUNCE_MS = 1200;
+    const hints = new Map();
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    reader.hints = hints;
 
-    function selectedFormats() {
-      const vals = Array.from(formatsSel.selectedOptions).map(o => o.value);
-      const map = {
-        'EAN_13': BarcodeFormat.EAN_13,
-        'EAN_8' : BarcodeFormat.EAN_8,
-        'CODE_128': BarcodeFormat.CODE_128,
-        'QR_CODE' : BarcodeFormat.QR_CODE
-      };
-      return vals.map(v => map[v]).filter(Boolean);
-    }
-
-    function applyHints() {
-      const formats = selectedFormats();
-      const hints = new Map();
-      if (formats.length) hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
-      // Slightly increase effort for 1D barcodes
-      hints.set(DecodeHintType.TRY_HARDER, true);
-      reader.hints = hints;
-    }
-
-    function render() {
-      // total
-      let total = 0;
-      listEl.innerHTML = '';
-      for (const [code, data] of counts.entries()) {
-        total += data.count;
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td><code>${code}</code></td>
-          <td>${data.format}</td>
-          <td>${data.count}</td>
-          <td>
-            <button class="btn" data-act="add" data-code="${code}">+1</button>
-            <button class="btn" data-act="sub" data-code="${code}">−1</button>
-            <button class="btn" data-act="del" data-code="${code}">Löschen</button>
-          </td>`;
-        listEl.appendChild(tr);
+    zxingControls = reader.decodeFromVideoElement(vid, (result, err, controls) => {
+      if (result) {
+        const fmt = result.getBarcodeFormat();
+        const text = result.getText();
+        scanEl.textContent = `${text}  [${ZXingBrowser.BarcodeFormat[fmt] || fmt}]`;
+        try { navigator.vibrate && navigator.vibrate(30); } catch {}
+      } else if (err && !(err instanceof NotFoundException)) {
+        logWarn('ZXing Warnung: ' + err);
       }
-      totalEl.textContent = String(total);
-    }
-
-    function bump(code, format) {
-      const now = Date.now();
-      if (lastScan.code === code && (now - lastScan.t) < DEBOUNCE_MS) return; // entprellen
-      lastScan = { code, t: now };
-
-      const entry = counts.get(code) || { count: 0, format: format || 'unbekannt' };
-      entry.count += 1;
-      entry.format = format || entry.format;
-      counts.set(code, entry);
-      render();
-
-      if (beepChk.checked) {
-        // kurzer Beep via WebAudio (ohne externe Datei)
-        try {
-          const ctx = new (window.AudioContext || window.webkitAudioContext)();
-          const o = ctx.createOscillator(); const g = ctx.createGain();
-          o.type = 'square'; o.frequency.value = 880;
-          g.gain.setValueAtTime(0.05, ctx.currentTime);
-          o.connect(g).connect(ctx.destination);
-          o.start(); o.stop(ctx.currentTime + 0.07);
-        } catch {}
-        if (navigator.vibrate) navigator.vibrate(35);
-      }
-    }
-
-    listEl.addEventListener('click', (e) => {
-      const btn = e.target.closest('button[data-act]');
-      if (!btn) return;
-      const code = btn.dataset.code;
-      const act = btn.dataset.act;
-      const entry = counts.get(code);
-      if (!entry) return;
-      if (act === 'add') entry.count += 1;
-      if (act === 'sub') entry.count = Math.max(0, entry.count - 1);
-      if (act === 'del') counts.delete(code);
-      render();
     });
 
-    function start() {
-      applyHints();
-      const deviceKind = rearChk.checked ? { facingMode: { exact: 'environment' } } : { facingMode: 'user' };
-      // iOS braucht muted+playsinline, haben wir gesetzt
-      controls = reader.decodeFromVideoDevice(
-        undefined, // auto select
-        videoEl,
-        (result, err, controls_) => {
-          if (result) {
-            const text = result.getText();
-            const format = result.getBarcodeFormat();
-            bump(text, BarcodeFormat[format] || String(format));
-          } else if (err && !(err instanceof NotFoundException)) {
-            console.warn('Decode error:', err);
-          }
-        },
-        {
-          videoConstraints: {
-            audio: false,
-            video: {
-              ...deviceKind,
-              width: { ideal: 1280 },
-              height: { ideal: 720 }
-            }
-          }
-        }
-      );
+    logInfo('ZXing aktiv. Halte einen Code ins Bild.');
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (vid && !vid.paused) vid.pause();
+    } else {
+      if (vid && vid.paused) vid.play().catch(()=>{});
     }
-
-    function stop() {
-      if (controls) {
-        controls.stop();
-        controls = null;
-      }
-      if (videoEl.srcObject) {
-        const tracks = videoEl.srcObject.getTracks();
-        tracks.forEach(t => t.stop());
-        videoEl.srcObject = null;
-      }
-    }
-
-    startBtn.addEventListener('click', start);
-    stopBtn.addEventListener('click', stop);
-    resetBtn.addEventListener('click', () => { counts.clear(); render(); });
-    exportBtn.addEventListener('click', () => {
-      const rows = [['code','format','menge']];
-      for (const [code, data] of counts.entries()) {
-        rows.push([code, data.format, data.count]);
-      }
-      const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
-      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url; a.download = 'scan-liste.csv'; a.click();
-      URL.revokeObjectURL(url);
-    });
-
-    // Optional: Autostart nach Benutzerinteraktion (ein Tap auf die Seite)
-    document.addEventListener('click', function once() {
-      document.removeEventListener('click', once);
-      // nichts tun – sorgt nur dafür, dass AudioContext später entsperrt ist
-    }, { once: true });
-
-    // Render initial leer
-    render();
-  </script>
+  });
+</script>
 </body>
 </html>
